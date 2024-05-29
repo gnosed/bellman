@@ -334,8 +334,8 @@ pub fn parallel_fft<S: PrimeField, T: Group<S>>(
         a[0].group_add_assign(&t);
         b[0].group_sub_assign(&t);
 
-        left.iter_mut()
-            .zip(right.iter_mut())
+        left.par_iter_mut()
+            .zip(right.par_iter_mut())
             .enumerate()
             .for_each(|(i, (a, b))| {
                 let mut t = *b;
