@@ -20,7 +20,7 @@ use super::multicore::Worker;
 use rayon::join;
 use rayon::prelude::*;
 
-const CHUNK_SIZE: usize = 64;
+const CHUNK_SIZE: usize = 256;
 
 pub struct EvaluationDomain<S: PrimeField, G: Group<S>> {
     coeffs: Vec<G>,
