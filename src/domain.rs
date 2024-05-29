@@ -18,6 +18,9 @@ use super::SynthesisError;
 
 use super::multicore::Worker;
 use rayon::join;
+use rayon::prelude::*;
+
+const CHUNK_SIZE: usize = 64;
 
 pub struct EvaluationDomain<S: PrimeField, G: Group<S>> {
     coeffs: Vec<G>,
@@ -86,31 +89,26 @@ impl<S: PrimeField, G: Group<S>> EvaluationDomain<S, G> {
     pub fn ifft(&mut self, worker: &Worker) {
         best_fft(&mut self.coeffs, worker, &self.omegainv, self.exp);
 
-        worker.scope(self.coeffs.len(), |scope, chunk| {
-            let minv = self.minv;
-
-            for v in self.coeffs.chunks_mut(chunk) {
-                scope.spawn(move |_scope| {
-                    for v in v {
-                        v.group_mul_assign(&minv);
-                    }
-                });
+        let minv = self.minv;
+    
+        self.coeffs.par_chunks_mut(CHUNK_SIZE).for_each(|chunk| {
+            for v in chunk {
+                v.group_mul_assign(&minv);
             }
         });
     }
 
-    pub fn distribute_powers(&mut self, worker: &Worker, g: S) {
-        worker.scope(self.coeffs.len(), |scope, chunk| {
-            for (i, v) in self.coeffs.chunks_mut(chunk).enumerate() {
-                scope.spawn(move |_scope| {
-                    let mut u = g.pow_vartime(&[(i * chunk) as u64]);
-                    for v in v.iter_mut() {
-                        v.group_mul_assign(&u);
-                        u.mul_assign(&g);
-                    }
-                });
-            }
-        });
+    pub fn distribute_powers(&mut self, _worker: &Worker, g: S) {
+        self.coeffs
+            .par_chunks_mut(CHUNK_SIZE)
+            .enumerate()
+            .for_each(|(i, chunk)| {
+                let mut u = g.pow_vartime(&[(i * CHUNK_SIZE) as u64]);
+                for v in chunk.iter_mut() {
+                    v.group_mul_assign(&u);
+                    u.mul_assign(&g);
+                }
+            });
     }
 
     pub fn coset_fft(&mut self, worker: &Worker) {
@@ -137,56 +135,42 @@ impl<S: PrimeField, G: Group<S>> EvaluationDomain<S, G> {
     /// The target polynomial is the zero polynomial in our
     /// evaluation domain, so we must perform division over
     /// a coset.
-    pub fn divide_by_z_on_coset(&mut self, worker: &Worker) {
+    pub fn divide_by_z_on_coset(&mut self, _worker: &Worker) {
         let i = self.z(&S::MULTIPLICATIVE_GENERATOR).invert().unwrap();
 
-        worker.scope(self.coeffs.len(), |scope, chunk| {
-            for v in self.coeffs.chunks_mut(chunk) {
-                scope.spawn(move |_scope| {
-                    for v in v {
-                        v.group_mul_assign(&i);
-                    }
-                });
+        self.coeffs.par_chunks_mut(CHUNK_SIZE).for_each(|chunk| {
+            for v in chunk {
+                v.group_mul_assign(&i);
             }
         });
     }
 
     /// Perform O(n) multiplication of two polynomials in the domain.
-    pub fn mul_assign(&mut self, worker: &Worker, other: &EvaluationDomain<S, Scalar<S>>) {
+    pub fn mul_assign(&mut self, _worker: &Worker, other: &EvaluationDomain<S, Scalar<S>>) {
         assert_eq!(self.coeffs.len(), other.coeffs.len());
 
-        worker.scope(self.coeffs.len(), |scope, chunk| {
-            for (a, b) in self
-                .coeffs
-                .chunks_mut(chunk)
-                .zip(other.coeffs.chunks(chunk))
-            {
-                scope.spawn(move |_scope| {
-                    for (a, b) in a.iter_mut().zip(b.iter()) {
-                        a.group_mul_assign(&b.0);
-                    }
+        self.coeffs
+            .par_chunks_mut(CHUNK_SIZE)
+            .zip(other.coeffs.par_chunks(CHUNK_SIZE))
+            .for_each(|(a_chunk, b_chunk)| {
+                a_chunk.iter_mut().zip(b_chunk.iter()).for_each(|(a, b)| {
+                    a.group_mul_assign(&b.0);
                 });
-            }
-        });
+            });
     }
 
     /// Perform O(n) subtraction of one polynomial from another in the domain.
-    pub fn sub_assign(&mut self, worker: &Worker, other: &EvaluationDomain<S, G>) {
+    pub fn sub_assign(&mut self, _worker: &Worker, other: &EvaluationDomain<S, G>) {
         assert_eq!(self.coeffs.len(), other.coeffs.len());
 
-        worker.scope(self.coeffs.len(), |scope, chunk| {
-            for (a, b) in self
-                .coeffs
-                .chunks_mut(chunk)
-                .zip(other.coeffs.chunks(chunk))
-            {
-                scope.spawn(move |_scope| {
-                    for (a, b) in a.iter_mut().zip(b.iter()) {
-                        a.group_sub_assign(b);
-                    }
+        self.coeffs
+            .par_chunks_mut(CHUNK_SIZE)
+            .zip(other.coeffs.par_chunks(CHUNK_SIZE))
+            .for_each(|(a_chunk, b_chunk)| {
+                a_chunk.iter_mut().zip(b_chunk.iter()).for_each(|(a, b)| {
+                    a.group_sub_assign(b);
                 });
-            }
-        });
+            });
     }
 }
 
@@ -461,7 +445,6 @@ fn parallel_fft_consistency() {
     use rand_core::RngCore;
 
     fn test_consistency<S: PrimeField, R: RngCore>(mut rng: &mut R) {
-
         for _ in 0..5 {
             for log_n in 1..10 {
                 let n = 1 << log_n;
