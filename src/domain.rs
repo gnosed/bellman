@@ -90,20 +90,26 @@ impl<S: PrimeField, G: Group<S>> EvaluationDomain<S, G> {
         best_fft(&mut self.coeffs, worker, &self.omegainv, self.exp);
 
         let minv = self.minv;
-    
-        self.coeffs.par_chunks_mut(CHUNK_SIZE).for_each(|chunk| {
+
+        let log_cpus = worker.log_num_threads() as usize;
+        let chunk_size = self.coeffs.len() / log_cpus;
+
+        self.coeffs.par_chunks_mut(chunk_size).for_each(|chunk| {
             for v in chunk {
                 v.group_mul_assign(&minv);
             }
         });
     }
 
-    pub fn distribute_powers(&mut self, _worker: &Worker, g: S) {
+    pub fn distribute_powers(&mut self, worker: &Worker, g: S) {
+        let log_cpus = worker.log_num_threads() as usize;
+        let chunk_size = self.coeffs.len() / log_cpus;
+
         self.coeffs
-            .par_chunks_mut(CHUNK_SIZE)
+            .par_chunks_mut(chunk_size)
             .enumerate()
             .for_each(|(i, chunk)| {
-                let mut u = g.pow_vartime(&[(i * CHUNK_SIZE) as u64]);
+                let mut u = g.pow_vartime(&[(i * chunk_size) as u64]);
                 for v in chunk.iter_mut() {
                     v.group_mul_assign(&u);
                     u.mul_assign(&g);
@@ -135,10 +141,13 @@ impl<S: PrimeField, G: Group<S>> EvaluationDomain<S, G> {
     /// The target polynomial is the zero polynomial in our
     /// evaluation domain, so we must perform division over
     /// a coset.
-    pub fn divide_by_z_on_coset(&mut self, _worker: &Worker) {
+    pub fn divide_by_z_on_coset(&mut self, worker: &Worker) {
         let i = self.z(&S::MULTIPLICATIVE_GENERATOR).invert().unwrap();
 
-        self.coeffs.par_chunks_mut(CHUNK_SIZE).for_each(|chunk| {
+        let log_cpus = worker.log_num_threads() as usize;
+        let chunk_size = self.coeffs.len() / log_cpus;
+
+        self.coeffs.par_chunks_mut(chunk_size).for_each(|chunk| {
             for v in chunk {
                 v.group_mul_assign(&i);
             }
@@ -146,12 +155,17 @@ impl<S: PrimeField, G: Group<S>> EvaluationDomain<S, G> {
     }
 
     /// Perform O(n) multiplication of two polynomials in the domain.
-    pub fn mul_assign(&mut self, _worker: &Worker, other: &EvaluationDomain<S, Scalar<S>>) {
+    pub fn mul_assign(&mut self, worker: &Worker, other: &EvaluationDomain<S, Scalar<S>>) {
         assert_eq!(self.coeffs.len(), other.coeffs.len());
 
+        let log_cpus = worker.log_num_threads() as usize;
+        let chunk_size = self.coeffs.len() / log_cpus;
+
+        // let chunk_size = 2028;
+
         self.coeffs
-            .par_chunks_mut(CHUNK_SIZE)
-            .zip(other.coeffs.par_chunks(CHUNK_SIZE))
+            .par_chunks_mut(chunk_size)
+            .zip(other.coeffs.par_chunks(chunk_size))
             .for_each(|(a_chunk, b_chunk)| {
                 a_chunk.iter_mut().zip(b_chunk.iter()).for_each(|(a, b)| {
                     a.group_mul_assign(&b.0);
@@ -160,12 +174,16 @@ impl<S: PrimeField, G: Group<S>> EvaluationDomain<S, G> {
     }
 
     /// Perform O(n) subtraction of one polynomial from another in the domain.
-    pub fn sub_assign(&mut self, _worker: &Worker, other: &EvaluationDomain<S, G>) {
+    pub fn sub_assign(&mut self, worker: &Worker, other: &EvaluationDomain<S, G>) {
         assert_eq!(self.coeffs.len(), other.coeffs.len());
 
+        let log_cpus = worker.log_num_threads() as usize;
+        let chunk_size = self.coeffs.len() / log_cpus;
+        // let chunk_size = 128;
+
         self.coeffs
-            .par_chunks_mut(CHUNK_SIZE)
-            .zip(other.coeffs.par_chunks(CHUNK_SIZE))
+            .par_chunks_mut(chunk_size)
+            .zip(other.coeffs.par_chunks(chunk_size))
             .for_each(|(a_chunk, b_chunk)| {
                 a_chunk.iter_mut().zip(b_chunk.iter()).for_each(|(a, b)| {
                     a.group_sub_assign(b);
@@ -472,4 +490,95 @@ fn parallel_fft_consistency() {
     let rng = &mut rand::thread_rng();
 
     test_consistency::<Fr, _>(rng);
+}
+
+#[test]
+fn test_group_assign_performance() {
+    use rand_core::RngCore;
+    use std::time::Instant;
+
+    fn benchmark_sub_assign<S: PrimeField, R: RngCore>(
+        coeff_size: usize,
+        mut rng: &mut R,
+        chunk_size: usize,
+    ) {
+        let coeffs = 1 << coeff_size;
+
+        let mut v = vec![];
+        let mut v1 = vec![];
+        for _ in 0..coeffs {
+            v.push(Scalar::<S>(S::random(&mut rng)));
+            v1.push(Scalar::<S>(S::random(&mut rng)));
+        }
+
+        let mut domain = EvaluationDomain::from_coeffs(v.clone()).unwrap();
+        let domain1 = EvaluationDomain::from_coeffs(v1.clone()).unwrap();
+
+        let start = Instant::now();
+        domain
+            .coeffs
+            .par_chunks_mut(chunk_size)
+            .zip(domain1.coeffs.par_chunks(chunk_size))
+            .for_each(|(a_chunk, b_chunk)| {
+                a_chunk.iter_mut().zip(b_chunk.iter()).for_each(|(a, b)| {
+                    a.group_sub_assign(b);
+                });
+            });
+        let duration = start.elapsed();
+
+        println!(
+            "sub_assign - Time taken for chunk size {}: {:?}",
+            chunk_size, duration
+        );
+    }
+
+    fn benchmark_mul_assign<S: PrimeField, R: RngCore>(
+        coeff_size: usize,
+        mut rng: &mut R,
+        chunk_size: usize,
+    ) {
+        let coeffs = 1 << coeff_size;
+
+        let mut v = vec![];
+        let mut v1 = vec![];
+        for _ in 0..coeffs {
+            v.push(Scalar::<S>(S::random(&mut rng)));
+            v1.push(Scalar::<S>(S::random(&mut rng)));
+        }
+
+        let mut domain = EvaluationDomain::from_coeffs(v.clone()).unwrap();
+        let domain1 = EvaluationDomain::from_coeffs(v1.clone()).unwrap();
+
+        let start = Instant::now();
+        domain
+            .coeffs
+            .par_chunks_mut(chunk_size)
+            .zip(domain1.coeffs.par_chunks(chunk_size))
+            .for_each(|(a_chunk, b_chunk)| {
+                a_chunk.iter_mut().zip(b_chunk.iter()).for_each(|(a, b)| {
+                    a.group_mul_assign(&b.0);
+                });
+            });
+        let duration = start.elapsed();
+
+        println!(
+            "mul_assign - Time taken for chunk size {}: {:?}",
+            chunk_size, duration
+        );
+    }
+
+    let coeff_size = 15;
+    let worker = Worker::new();
+    let log_cpus = worker.log_num_threads() as usize;
+    let chunk_size = (1 << coeff_size) / log_cpus;
+    let chunk_sizes = [
+        8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, chunk_size,
+    ];
+    let rng = &mut rand::thread_rng();
+    for &size in &chunk_sizes {
+        benchmark_sub_assign::<bls12_381::Scalar, _>(coeff_size, rng, size);
+    }
+    for &size in &chunk_sizes {
+        benchmark_mul_assign::<bls12_381::Scalar, _>(coeff_size, rng, size);
+    }
 }
