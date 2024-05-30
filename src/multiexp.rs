@@ -315,7 +315,9 @@ where
     G::Scalar: PrimeFieldBits,
     S: SourceBuilder<<G as PrimeCurve>::Affine>,
 {
-    let c = if exponents.len() < 32 {
+    let c: u32 = if exponents.len() < 4 {
+        1u32
+    } else if exponents.len() < 32 {
         3u32
     } else {
         (f64::from(exponents.len() as u32)).ln().ceil() as u32
