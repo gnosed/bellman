@@ -288,7 +288,7 @@ fn best_fft<S: PrimeField, T: Group<S>>(a: &mut [T], worker: &Worker, omega: &S,
     if log_n <= log_cpus {
         serial_fft(a, n, log_n, &twiddles);
     } else {
-        parallel_fft(a, n, 1, &twiddles);
+        radix_4_fft(a, n, 1, &twiddles);
     }
 }
 
@@ -331,10 +331,13 @@ pub fn parallel_fft<S: PrimeField, T: Group<S>>(
     twiddles: &[S],
 ) {
     if n == 2 {
-        let t = a[1];
-        a[1] = a[0];
-        a[0].group_add_assign(&t);
-        a[1].group_sub_assign(&t);
+        let (a0, a1) = a.split_at_mut(1);
+
+        radix_2_butterfly(&mut a0[0], &mut a1[0]);
+        // let t = a[1];
+        // a[1] = a[0];
+        // a[0].group_add_assign(&t);
+        // a[1].group_sub_assign(&t);
     } else {
         let (left, right) = a.split_at_mut(n / 2);
         join(
@@ -345,22 +348,90 @@ pub fn parallel_fft<S: PrimeField, T: Group<S>>(
         // case when twiddle factor is one
         let (a, left) = left.split_at_mut(1);
         let (b, right) = right.split_at_mut(1);
-        let t = b[0];
-        b[0] = a[0];
-        a[0].group_add_assign(&t);
-        b[0].group_sub_assign(&t);
+
+        radix_2_butterfly(&mut a[0], &mut b[0]);
+        // let t = b[0];
+        // b[0] = a[0];
+        // a[0].group_add_assign(&t);
+        // b[0].group_sub_assign(&t);
 
         left.iter_mut()
             .zip(right.iter_mut())
             .enumerate()
             .for_each(|(i, (a, b))| {
-                let mut t = *b;
-                t.group_mul_assign(&twiddles[(i + 1) * twiddle_chunk]);
-                *b = *a;
-                a.group_add_assign(&t);
-                b.group_sub_assign(&t);
+                radix_2_butterfly_twiddle(a, b, &twiddles[(i + 1) * twiddle_chunk]);
+                // let mut t = *b;
+                // t.group_mul_assign(&twiddles[(i + 1) * twiddle_chunk]);
+                // *b = *a;
+                // a.group_add_assign(&t);
+                // b.group_sub_assign(&t);
             });
     }
+}
+
+pub fn radix_2_butterfly<S: PrimeField, T: Group<S>>(a: &mut T, b: &mut T) {
+    let t = *b;
+    *b = *a;
+    a.group_add_assign(&t);
+    b.group_sub_assign(&t);
+}
+
+// a = a + t * omega_n^k (twiddle_factor)
+// b = a
+// b = b - t * omega_n^k (twiddle_factor)
+pub fn radix_2_butterfly_twiddle<S: PrimeField, T: Group<S>>(
+    a: &mut T,
+    b: &mut T,
+    twiddle_factor: &S,
+) {
+    let mut t = *b;
+    t.group_mul_assign(twiddle_factor);
+    *b = *a;
+    a.group_add_assign(&t);
+    b.group_sub_assign(&t);
+}
+
+pub fn radix_4_butterfly_twiddle<S: PrimeField, T: Group<S>>(
+    a: &mut [T],
+    b: &mut [T],
+    c: &mut [T],
+    d: &mut [T],
+    twiddle_chunk: usize,
+    twiddles: &[S],
+) {
+    radix_2_butterfly(&mut a[0], &mut b[0]);
+    radix_2_butterfly(&mut c[0], &mut d[0]);
+
+    a.iter_mut()
+        .zip(b.iter_mut())
+        .zip(c.iter_mut())
+        .zip(d.iter_mut())
+        .enumerate()
+        .for_each(|(i, (((a, b), c), d))| {
+            radix_2_butterfly_twiddle(a, b, &twiddles[(i + 1) * twiddle_chunk]);
+            radix_2_butterfly_twiddle(c, d, &twiddles[(i + 1) * twiddle_chunk]);
+        });
+}
+
+pub fn radix_4_fft<S: PrimeField, T: Group<S>>(
+    a: &mut [T],
+    n: usize,
+    twiddle_chunk: usize,
+    twiddles: &[S],
+) {
+    let (a1, a2) = a.split_at_mut(n / 2);
+    let (x1, x2) = a1.split_at_mut(n / 4);
+    let (x3, x4) = a2.split_at_mut(n / 4);
+
+    join(
+        || parallel_fft(x1, n / 4, twiddle_chunk * 4, twiddles),
+        || parallel_fft(x2, n / 4, twiddle_chunk * 4, twiddles),
+    );
+
+    join(
+        || parallel_fft(x3, n / 4, twiddle_chunk * 4, twiddles),
+        || parallel_fft(x4, n / 4, twiddle_chunk * 4, twiddles),
+    );
 }
 
 // Test multiplying various (low degree) polynomials together and
@@ -461,7 +532,6 @@ fn parallel_fft_consistency() {
     use rand_core::RngCore;
 
     fn test_consistency<S: PrimeField, R: RngCore>(mut rng: &mut R) {
-
         for _ in 0..5 {
             for log_n in 1..10 {
                 let n = 1 << log_n;
