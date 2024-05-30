@@ -20,8 +20,6 @@ use super::multicore::Worker;
 use rayon::join;
 use rayon::prelude::*;
 
-const CHUNK_SIZE: usize = 128;
-
 pub struct EvaluationDomain<S: PrimeField, G: Group<S>> {
     coeffs: Vec<G>,
     exp: u32,
@@ -270,6 +268,7 @@ fn best_fft<S: PrimeField, T: Group<S>>(a: &mut [T], worker: &Worker, omega: &S,
         return;
     }
 
+    // bit-reversal
     let offset = 64 - log_n;
     for i in 0..n as u64 {
         let ri = i.reverse_bits() >> offset;
@@ -290,7 +289,7 @@ fn best_fft<S: PrimeField, T: Group<S>>(a: &mut [T], worker: &Worker, omega: &S,
     if log_n <= log_cpus {
         serial_fft(a, n, log_n, &twiddles);
     } else {
-        parallel_fft(a, n, 1, &twiddles);
+        radix_2_fft(a, n, 1, &twiddles);
     }
 }
 
@@ -305,20 +304,13 @@ fn serial_fft<S: PrimeField, T: Group<S>>(a: &mut [T], n: usize, log_n: u32, twi
             // case when twiddle factor is one
             let (a, left) = left.split_at_mut(1);
             let (b, right) = right.split_at_mut(1);
-            let t = b[0];
-            b[0] = a[0];
-            a[0].group_add_assign(&t);
-            b[0].group_sub_assign(&t);
+            radix_2_butterfly_op(&mut a[0], &mut b[0]);
 
             left.iter_mut()
                 .zip(right.iter_mut())
                 .enumerate()
                 .for_each(|(i, (a, b))| {
-                    let mut t = *b;
-                    t.group_mul_assign(&twiddles[(i + 1) * twiddle_chunk as usize]);
-                    *b = *a;
-                    a.group_add_assign(&t);
-                    b.group_sub_assign(&t);
+                    radix_2_butterfly_op_twiddle(a, b, &twiddles[(i + 1) * twiddle_chunk]);
                 });
         });
         chunk *= 2;
@@ -326,43 +318,59 @@ fn serial_fft<S: PrimeField, T: Group<S>>(a: &mut [T], n: usize, log_n: u32, twi
     }
 }
 
-pub fn parallel_fft<S: PrimeField, T: Group<S>>(
+pub fn radix_2_fft<S: PrimeField, T: Group<S>>(
     a: &mut [T],
     n: usize,
     twiddle_chunk: usize,
     twiddles: &[S],
 ) {
     if n == 2 {
-        let t = a[1];
-        a[1] = a[0];
-        a[0].group_add_assign(&t);
-        a[1].group_sub_assign(&t);
+        let (left, right) = a.split_at_mut(1);
+        radix_2_butterfly_op(&mut left[0], &mut right[0]);
     } else {
         let (left, right) = a.split_at_mut(n / 2);
+
         join(
-            || parallel_fft(left, n / 2, twiddle_chunk * 2, twiddles),
-            || parallel_fft(right, n / 2, twiddle_chunk * 2, twiddles),
+            || radix_2_fft(left, n / 2, twiddle_chunk * 2, twiddles),
+            || radix_2_fft(right, n / 2, twiddle_chunk * 2, twiddles),
         );
 
         // case when twiddle factor is one
         let (a, left) = left.split_at_mut(1);
         let (b, right) = right.split_at_mut(1);
-        let t = b[0];
-        b[0] = a[0];
-        a[0].group_add_assign(&t);
-        b[0].group_sub_assign(&t);
+        radix_2_butterfly_op(&mut a[0], &mut b[0]);
 
         left.par_iter_mut()
             .zip(right.par_iter_mut())
             .enumerate()
             .for_each(|(i, (a, b))| {
-                let mut t = *b;
-                t.group_mul_assign(&twiddles[(i + 1) * twiddle_chunk]);
-                *b = *a;
-                a.group_add_assign(&t);
-                b.group_sub_assign(&t);
+                radix_2_butterfly_op_twiddle(a, b, &twiddles[(i + 1) * twiddle_chunk]);
             });
     }
+}
+
+// Radix-2 FFT basic butterfly op without twiddle factor
+pub fn radix_2_butterfly_op<S: PrimeField, T: Group<S>>(a: &mut T, b: &mut T) {
+    let t = *b;
+    *b = *a;
+    a.group_add_assign(&t);
+    b.group_sub_assign(&t);
+}
+
+// Radix-2 FFT basic butterfly op with twiddle factor
+// b = a
+// a = a + t * omega_n^k (twiddle_factor)
+// b = b - t * omega_n^k (twiddle_factor)
+pub fn radix_2_butterfly_op_twiddle<S: PrimeField, T: Group<S>>(
+    a: &mut T,
+    b: &mut T,
+    twiddle_factor: &S,
+) {
+    let mut t = *b;
+    t.group_mul_assign(twiddle_factor);
+    *b = *a;
+    a.group_add_assign(&t);
+    b.group_sub_assign(&t);
 }
 
 // Test multiplying various (low degree) polynomials together and
@@ -481,7 +489,7 @@ fn parallel_fft_consistency() {
                     .collect();
 
                 serial_fft(&mut v1.coeffs, n, log_n, &twiddles);
-                parallel_fft(&mut v2.coeffs, n, 1, &twiddles);
+                radix_2_fft(&mut v2.coeffs, n, 1, &twiddles);
                 assert!(v1.coeffs == v2.coeffs);
             }
         }
