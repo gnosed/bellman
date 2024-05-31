@@ -44,7 +44,7 @@ mod implementation {
             // limits, we run the risk of memory exhaustion due to limited
             // stack space consumed by all of the pending closures to be
             // executed.
-            let previous_count = WORKER_SPAWN_COUNTER.fetch_add(1, Ordering::SeqCst);
+            let previous_count = WORKER_SPAWN_COUNTER.fetch_add(1, Ordering::Relaxed);
 
             // If the number of spawns requested has exceeded the number
             // of cores available for processing by some factor (the
@@ -59,16 +59,16 @@ mod implementation {
                     trace!("[{}] switching to scope to help clear backlog [threads: current {}, requested {}]",
                         thread_index,
                         current_num_threads(),
-                        WORKER_SPAWN_COUNTER.load(Ordering::SeqCst));
+                        WORKER_SPAWN_COUNTER.load(Ordering::Relaxed));
                     let res = f();
                     sender.send(res).unwrap();
-                    WORKER_SPAWN_COUNTER.fetch_sub(1, Ordering::SeqCst);
+                    WORKER_SPAWN_COUNTER.fetch_sub(1, Ordering::Relaxed);
                 });
             } else {
                 rayon::spawn(move || {
                     let res = f();
                     sender.send(res).unwrap();
-                    WORKER_SPAWN_COUNTER.fetch_sub(1, Ordering::SeqCst);
+                    WORKER_SPAWN_COUNTER.fetch_sub(1, Ordering::Relaxed);
                 });
             }
 
