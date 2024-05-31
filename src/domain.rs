@@ -20,6 +20,14 @@ use super::multicore::Worker;
 use rayon::join;
 use rayon::prelude::*;
 
+pub fn best_chunk_size(coeffs_len: usize, log_num_threads: u32) -> usize {
+    let num_threads = 2usize.pow(log_num_threads - 1);
+    if coeffs_len < num_threads {
+        1
+    } else {
+        coeffs_len / num_threads
+    }
+}
 pub struct EvaluationDomain<S: PrimeField, G: Group<S>> {
     coeffs: Vec<G>,
     exp: u32,
@@ -89,9 +97,7 @@ impl<S: PrimeField, G: Group<S>> EvaluationDomain<S, G> {
 
         let minv = self.minv;
 
-        let log_cpus = worker.log_num_threads() as usize;
-        let chunk_size = self.coeffs.len() / log_cpus;
-
+        let chunk_size = best_chunk_size(self.coeffs.len(), worker.log_num_threads());
         self.coeffs.par_chunks_mut(chunk_size).for_each(|chunk| {
             for v in chunk {
                 v.group_mul_assign(&minv);
@@ -100,9 +106,7 @@ impl<S: PrimeField, G: Group<S>> EvaluationDomain<S, G> {
     }
 
     pub fn distribute_powers(&mut self, worker: &Worker, g: S) {
-        let log_cpus = worker.log_num_threads() as usize;
-        let chunk_size = self.coeffs.len() / log_cpus;
-
+        let chunk_size = best_chunk_size(self.coeffs.len(), worker.log_num_threads());
         self.coeffs
             .par_chunks_mut(chunk_size)
             .enumerate()
@@ -142,9 +146,7 @@ impl<S: PrimeField, G: Group<S>> EvaluationDomain<S, G> {
     pub fn divide_by_z_on_coset(&mut self, worker: &Worker) {
         let i = self.z(&S::MULTIPLICATIVE_GENERATOR).invert().unwrap();
 
-        let log_cpus = worker.log_num_threads() as usize;
-        let chunk_size = self.coeffs.len() / log_cpus;
-
+        let chunk_size = best_chunk_size(self.coeffs.len(), worker.log_num_threads());
         self.coeffs.par_chunks_mut(chunk_size).for_each(|chunk| {
             for v in chunk {
                 v.group_mul_assign(&i);
@@ -156,11 +158,7 @@ impl<S: PrimeField, G: Group<S>> EvaluationDomain<S, G> {
     pub fn mul_assign(&mut self, worker: &Worker, other: &EvaluationDomain<S, Scalar<S>>) {
         assert_eq!(self.coeffs.len(), other.coeffs.len());
 
-        let log_cpus = worker.log_num_threads() as usize;
-        let chunk_size = self.coeffs.len() / log_cpus;
-
-        // let chunk_size = 2028;
-
+        let chunk_size = best_chunk_size(self.coeffs.len(), worker.log_num_threads());
         self.coeffs
             .par_chunks_mut(chunk_size)
             .zip(other.coeffs.par_chunks(chunk_size))
@@ -175,9 +173,7 @@ impl<S: PrimeField, G: Group<S>> EvaluationDomain<S, G> {
     pub fn sub_assign(&mut self, worker: &Worker, other: &EvaluationDomain<S, G>) {
         assert_eq!(self.coeffs.len(), other.coeffs.len());
 
-        let log_cpus = worker.log_num_threads() as usize;
-        let chunk_size = self.coeffs.len() / log_cpus;
-        // let chunk_size = 128;
+        let chunk_size = best_chunk_size(self.coeffs.len(), worker.log_num_threads());
 
         self.coeffs
             .par_chunks_mut(chunk_size)
@@ -656,7 +652,7 @@ fn test_group_assign_performance() {
 
     let coeff_size = 15;
     let worker = Worker::new();
-    let log_cpus = worker.log_num_threads() as usize;
+    let log_cpus = worker.log_num_threads();
     let chunk_size = (1 << coeff_size) / log_cpus;
     let chunk_sizes = [
         8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, chunk_size,
