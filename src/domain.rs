@@ -372,6 +372,85 @@ pub fn radix_2_butterfly_op_twiddle<S: PrimeField, T: Group<S>>(
     a.group_add_assign(&t);
     b.group_sub_assign(&t);
 }
+// Radix-4 FFT
+pub fn radix_4_fft<S: PrimeField, T: Group<S>>(
+    a: &mut [T],
+    n: usize,
+    twiddle_chunk: usize,
+    twiddles: &[S],
+) {
+    let (left, right) = a.split_at_mut(n / 2);
+    radix_4_recursive_fft(left, right, n / 2, 2, &twiddles);
+
+    radix_2_butterfly_op(&mut left[0], &mut right[0]);
+
+    left.iter_mut()
+        .zip(right.iter_mut())
+        .enumerate()
+        .for_each(|(i, (a, b))| {
+            radix_2_butterfly_op_twiddle(a, b, &twiddles[i * twiddle_chunk]);
+        });
+}
+
+pub fn radix_4_recursive_fft<S: PrimeField, T: Group<S>>(
+    left: &mut [T],
+    right: &mut [T],
+    n: usize,
+    twiddle_chunk: usize,
+    twiddles: &[S],
+) {
+    if n == 8 {
+        // case when twiddle factor is one
+        let (a1, a2) = left.split_at_mut(1);
+        let (b1, b2) = right.split_at_mut(1);
+        radix_2_butterfly_op(&mut a1[0], &mut b1[0]);
+        radix_2_butterfly_op(&mut a2[0], &mut b2[0]);
+
+        let (a, b) = left.split_at_mut(n / 2);
+        let (c, d) = right.split_at_mut(n / 2);
+
+        let (c1, c2) = a.split_at_mut(n / 4);
+        let (d1, d2) = b.split_at_mut(n / 4);
+        let (e1, e2) = c.split_at_mut(n / 4);
+        let (f1, f2) = d.split_at_mut(n / 4);
+
+        radix_4_butterfly_op_twiddle(c1, c2, d1, d2, twiddle_chunk * 2, twiddles);
+        radix_4_butterfly_op_twiddle(e1, e2, f1, f2, twiddle_chunk * 2, twiddles);
+        radix_4_butterfly_op_twiddle(a, b, c, d, twiddle_chunk, twiddles);
+    } else {
+        let (a1, a2) = left.split_at_mut(n / 2);
+        let (b1, b2) = right.split_at_mut(n / 2);
+
+        join(
+            || radix_4_recursive_fft(a1, a2, n / 2, twiddle_chunk * 2, twiddles),
+            || radix_4_recursive_fft(b1, b2, n / 2, twiddle_chunk * 2, twiddles),
+        );
+
+        radix_4_butterfly_op_twiddle(a1, a2, b1, b2, twiddle_chunk, twiddles);
+    }
+}
+
+pub fn radix_4_butterfly_op_twiddle<S: PrimeField, T: Group<S>>(
+    a: &mut [T],
+    b: &mut [T],
+    c: &mut [T],
+    d: &mut [T],
+    twiddle_chunk: usize,
+    twiddles: &[S],
+) {
+    radix_2_butterfly_op(&mut a[0], &mut b[0]);
+    radix_2_butterfly_op(&mut c[0], &mut d[0]);
+
+    a.iter_mut()
+        .zip(b.iter_mut())
+        .zip(c.iter_mut())
+        .zip(d.iter_mut())
+        .enumerate()
+        .for_each(|(i, (((a, b), c), d))| {
+            radix_2_butterfly_op_twiddle(a, b, &twiddles[i * twiddle_chunk]);
+            radix_2_butterfly_op_twiddle(c, d, &twiddles[i * twiddle_chunk]);
+        });
+}
 
 // Test multiplying various (low degree) polynomials together and
 // comparing with naive evaluations.
